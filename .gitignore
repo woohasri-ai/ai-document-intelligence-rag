@@ -16,3 +16,6 @@ venv/
 # Operating system files
 Thumbs.db
 .DS_Store
+
+# Private input documents
+documents/

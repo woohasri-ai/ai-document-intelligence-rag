@@ -19,3 +19,6 @@ Thumbs.db
 
 # Private input documents
 documents/
+
+# Local vector database
+chroma_db/

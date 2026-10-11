@@ -1,22 +1,31 @@
 
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
+import chromadb
 
-def split_into_chunks(text, chunk_size=500):
+
+def split_into_chunks(text, chunk_size=150, overlap=30):
     words = text.split()
     chunks = []
 
-    for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i:i + chunk_size])
+    start = 0
+
+    while start < len(words):
+        end = start + chunk_size
+        chunk = " ".join(words[start:end])
         chunks.append(chunk)
 
+        start += chunk_size - overlap
+
     return chunks
+
 
 def main():
     pdf_path = "documents/Aiml map .pdf"
 
     reader = PdfReader(pdf_path)
-
+    print("DEBUG: PDF opened")
+    
     print(f"Number of pages: {len(reader.pages)}")
     all_text = []
     
@@ -34,22 +43,37 @@ def main():
     chunks = split_into_chunks(full_text, chunk_size=500)
     
     model = SentenceTransformer("all-MiniLM-L6-v2")
+    client = chromadb.PersistentClient(path="chroma_db")
 
+    collection = client.get_or_create_collection(
+    name="ai_document_collection"
+    )
     embeddings = model.encode(chunks)
+    print(f"DEBUG: Created {len(chunks)} chunks")
+    print("DEBUG: Generating embeddings...")
     
-    question = "What skills should I learn to become an AI Engineer?"
+    print("DEBUG: Embeddings generated")
+    
+    collection.upsert(
+    ids=[f"chunk_{i}" for i in range(len(chunks))],
+    documents=chunks,
+    embeddings=embeddings.tolist()
+    )
 
-    question_embedding = model.encode([question])
+    print(f"Stored {collection.count()} chunks in ChromaDB.")
+    print("Expected chunks:", len(chunks))
+    question = "Which programming and data skills should I learn first?"
+    
+    results = collection.query(
+    query_embeddings=model.encode([question]).tolist(),
+    n_results=1
+    )
 
-    similarities = model.similarity(question_embedding, embeddings)
-
-    best_match_index = similarities.argmax().item()
-
-    print("\n--- Semantic Search Results ---")
+    print("\n--- ChromaDB Search Results ---")
     print(f"Question: {question}")
-    print(f"Best matching chunk: {best_match_index + 1}")
-    print(f"Similarity score: {similarities[0][best_match_index].item():.4f}")
-    print(f"Matched text: {chunks[best_match_index][:300]}")
+    print(f"Matched text: {results['documents'][0][0]}")
+    print(f"Chunk ID: {results['ids'][0][0]}")
+    print(f"Distance: {results['distances'][0][0]:.4f}")
     print("\n--- Embedding Results ---")
     print(f"Number of embeddings: {len(embeddings)}")
     print(f"Vector dimensions: {embeddings.shape[1]}")

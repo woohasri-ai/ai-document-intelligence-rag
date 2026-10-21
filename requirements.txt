@@ -1,0 +1,6 @@
+streamlit
+chromadb
+python-dotenv
+google-genai
+pypdf
+sentence-transformers

@@ -1,6 +1,6 @@
-streamlit
-chromadb
-python-dotenv
-google-genai
-pypdf
-sentence-transformers
+streamlit==1.66.0
+chromadb==1.5.9
+python-dotenv==1.2.4
+google-genai==2.29.0
+pypdf==6.20.0
+sentence-transformers==6.1.0

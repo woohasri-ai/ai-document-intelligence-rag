@@ -39,18 +39,21 @@ Powered by Google Gemini, Sentence Transformers, and ChromaDB, DocuMind AI combi
 5. **Retrieve:** Search for passages relevant to the user's question.
 6. **Generate:** Provide the retrieved passages to Gemini as context for answer generation.
 7. **Display:** Present the answer with source references and supporting document passages.
-
 ## Project Structure
 
 ```text
 ai-document-intelligence-rag/
-├── documents/                 # Local PDF documents (ignored by Git)
 ├── src/
 │   ├── __init__.py
-│   ├── app.py                 # Streamlit interface
-│   ├── main.py                # RAG, chunking and retrieval logic
-│   ├── gemini_service.py      # Gemini API integration
-│   ├── test_rag.py            # RAG tests
-│   ├── test_gemini_service.py # Gemini service tests
-│   └── test_gemini.py         # Retrieval and grounding tests
-├── uploaded
+│   ├── app.py                  # Streamlit interface
+│   ├── main.py                 # RAG, chunking, and retrieval logic
+│   ├── gemini_service.py       # Gemini API integration
+│   ├── test_rag.py             # RAG tests
+│   ├── test_gemini_service.py  # Gemini service tests
+│   └── test_gemini.py          # Retrieval and grounding tests
+├── requirements.txt            # Project dependencies
+├── README.md                   # Project documentation
+└── .gitignore                  # Excludes secrets and local files
+```
+
+**Note:** PDF documents, API keys, virtual environments, and local vector databases are excluded from the public repository.

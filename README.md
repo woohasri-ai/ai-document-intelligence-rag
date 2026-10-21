@@ -1,155 +1,56 @@
 # DocuMind AI — AI-Powered Document Intelligence & Question Answering
 
-DocuMind AI is an AI-powered document question-answering application that uses **Retrieval-Augmented Generation (RAG)** to answer questions from uploaded PDF documents. It retrieves relevant document passages, generates answers using Google Gemini, and displays supporting passages with source page numbers to help users verify the answers.
+DocuMind AI is an AI-powered document question-answering application built using **Retrieval-Augmented Generation (RAG)**. It allows users to upload multiple PDF documents, ask questions about their contents, and receive AI-generated answers supported by relevant document passages and PDF page references.
+
+Powered by Google Gemini, Sentence Transformers, and ChromaDB, DocuMind AI combines semantic search with grounded answer generation to make document research more accessible and verifiable.
 
 ## Features
 
-- **Multiple PDF uploads:** Upload and query multiple PDF documents in one session.
-- **Document text extraction:** Extract searchable text from PDF files using `pypdf`.
-- **Section-aware chunking:** Split document content into manageable chunks while preserving section context.
-- **Semantic retrieval:** Use sentence embeddings and ChromaDB vector search to retrieve relevant passages.
-- **AI-powered answers:** Generate context-grounded responses using the Gemini API.
-- **Source citations:** Display supporting passages and PDF page numbers alongside answers.
-- **Reduced unsupported answers:** Provide retrieved document context to the language model so answers can be grounded in the supplied documents.
-- **Interactive interface:** Use a Streamlit web interface to upload documents and ask questions.
-- **Automated tests:** Test core RAG functionality and Gemini service integration.
+- **Multiple PDF uploads:** Upload and query multiple PDF documents in a single session.
+- **PDF text extraction:** Extract searchable text and page information using `pypdf`.
+- **Section-aware chunking:** Split document content into manageable chunks while preserving section context and page metadata.
+- **Semantic retrieval:** Generate text embeddings and retrieve relevant passages using ChromaDB.
+- **AI-powered answers:** Generate context-grounded responses using the Google Gemini API.
+- **Cross-document comparison:** Ask questions that compare information across multiple uploaded PDFs.
+- **Source citations:** Display document filenames, PDF page references, and supporting passages.
+- **Evidence transparency:** Inspect retrieved passages to understand which document content supports an answer.
+- **Interactive interface:** Upload documents and ask questions through a Streamlit web interface.
+- **Automated tests:** Test topic detection, section matching, distance filtering, prompt grounding, and PDF chunk creation.
 
 ## Technology Stack
 
-- **Python 3.12**
-- **Streamlit** — interactive web application
-- **pypdf** — PDF text extraction
-- **Sentence Transformers** — text embeddings
-- **ChromaDB** — vector storage and retrieval
-- **Google Gemini API** — answer generation
-- **Python unittest** — automated testing
-- **Git and GitHub** — version control
+| Technology | Purpose |
+|---|---|
+| Python 3.12 | Core application logic |
+| Streamlit | Interactive web interface |
+| pypdf | PDF text extraction |
+| Sentence Transformers | Text embeddings |
+| ChromaDB | Vector storage and semantic retrieval |
+| Google Gemini API | AI answer generation |
+| Python unittest | Automated testing |
+| Git and GitHub | Version control and project hosting |
 
 ## How It Works
 
-1. **Upload:** The user uploads one or more PDF documents.
-2. **Extract:** The application extracts text and page information from the PDFs.
-3. **Chunk:** Extracted text is divided into section-aware chunks.
-4. **Embed and index:** Text chunks are converted into embeddings and stored in ChromaDB.
-5. **Retrieve:** The application searches for relevant passages based on the user's question.
-6. **Generate:** Retrieved passages are supplied as context to Gemini.
-7. **Display:** The application presents the answer along with supporting document passages and page references.
+1. **Upload:** Upload one or more PDF documents.
+2. **Extract:** Extract text and page metadata from the PDFs.
+3. **Chunk:** Divide extracted text into section-aware chunks.
+4. **Embed and index:** Convert text chunks into embeddings and store them in ChromaDB.
+5. **Retrieve:** Search for passages relevant to the user's question.
+6. **Generate:** Provide the retrieved passages to Gemini as context for answer generation.
+7. **Display:** Present the answer with source references and supporting document passages.
 
 ## Project Structure
 
 ```text
 ai-document-intelligence-rag/
-├── documents/              # Local PDF documents (not committed)
+├── documents/                 # Local PDF documents (ignored by Git)
 ├── src/
 │   ├── __init__.py
-│   ├── app.py               # Streamlit application
-│   ├── main.py              # RAG, chunking and retrieval logic
-│   ├── gemini_service.py    # Gemini API integration
-│   ├── test_rag.py          # RAG tests
-│   └── test_gemini_service.py
-├── uploaded_chroma_db/      # Local vector database (not committed)
-├── .env                     # Private API key (not committed)
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
-
-## Prerequisites
-
-- Python 3.12 or a compatible Python version
-- Git
-- A Google Gemini API key
-
-## Installation and Setup
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/woohasri-ai/ai-document-intelligence-rag.git
-cd ai-document-intelligence-rag
-```
-
-### 2. Create a virtual environment
-
-**Windows PowerShell:**
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### 3. Install dependencies
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-### 4. Configure the Gemini API key
-
-Create a `.env` file in the project root and add:
-
-```text
-GEMINI_API_KEY=your_gemini_api_key_here
-```
-
-Replace the placeholder with your own API key. Never commit your `.env` file or share your API key publicly.
-
-### 5. Run the application
-
-**Windows PowerShell:**
-
-```powershell
-$env:PYTHONPATH = (Get-Location).Path
-python -m streamlit run src/app.py
-```
-
-Open the local URL displayed in the terminal, usually `http://localhost:8501` or another available port.
-
-## Running the Tests
-
-Run the automated RAG and Gemini service tests:
-
-```powershell
-$env:PYTHONPATH = (Get-Location).Path
-python -m unittest src.test_rag src.test_gemini_service -v
-```
-
-The project's RAG and mocked Gemini service test suites have previously passed **29 tests**. Run the command above to verify the current checkout.
-
-## Example Questions
-
-After uploading relevant PDFs, try questions such as:
-
-- What technical skills are mentioned in the resume?
-- What evaluation metrics should I use to assess an AI chatbot?
-- What technologies are covered in Phase 9 of the roadmap?
-- Compare information discussed across the uploaded documents.
-
-Answers depend on the content of the uploaded documents and the quality of retrieved passages.
-
-## Current Limitations
-
-- PDF files must contain extractable text; scanned documents may require OCR.
-- Answer quality depends on document quality, chunking, retrieval relevance, and the language model.
-- Gemini API access requires a valid API key and may incur usage costs.
-- Local vector data is stored on the machine and is excluded from version control.
-- The application is currently designed as a local Streamlit application; public deployment and production hardening are separate steps.
-
-## Future Improvements
-
-- Add OCR support for scanned PDFs.
-- Improve retrieval ranking and evaluation.
-- Add document-level filtering and richer citation navigation.
-- Add a systematic RAG evaluation dataset and performance metrics.
-- Deploy the application to a hosted environment.
-- Add authentication and production-grade security where needed.
-
-## Author
-
-**Wooha Sri**
-
-GitHub: [woohasri-ai](https://github.com/woohasri-ai)
-
----
-
-*DocuMind AI — Your documents, understood.*
+│   ├── app.py                 # Streamlit interface
+│   ├── main.py                # RAG, chunking and retrieval logic
+│   ├── gemini_service.py      # Gemini API integration
+│   ├── test_rag.py            # RAG tests
+│   ├── test_gemini_service.py # Gemini service tests
+│   └── test_gemini.py         # Retrieval and grounding tests
+├── uploaded

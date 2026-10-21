@@ -1,13 +1,17 @@
+
 import os
 import re
 import time
+import hashlib
 from pathlib import Path
+
 import chromadb
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
+
 
 # ============================================================
 # 1. CONFIGURATION
@@ -25,9 +29,7 @@ CHUNK_SIZE = 250
 CHUNK_OVERLAP = 30
 
 TOP_K = 5
-# Larger candidate pool improves section-targeted retrieval.
 CANDIDATE_K = 20
-
 MAX_RETRIEVAL_DISTANCE = 1.65
 SECTION_MATCH_BONUS = 0.25
 
@@ -75,12 +77,26 @@ PHASE_TOPICS = {
     12: "deployment",
 }
 
+SECTION_HEADING_PATTERN = (
+    r"\bPHASE\s+\d+\s*[—-]"
+    r"|\bPROFESSIONAL\s+SUMMARY\b\s*:?"
+    r"|\bSOFT\s+SKILLS\b\s*:?"
+    r"|\bTECHNICAL\s+SKILLS\b\s*:?"
+    r"|(?<!SOFT )(?<!TECHNICAL )\bSKILLS\b\s*(?::|↓)"
+    r"|\bEDUCATION\b\s*:?"
+    r"|\bPROJECTS\b\s*:?"
+    r"|\bINTERNSHIPS\s*&?\s*CERTIFICATIONS\b\s*:?"
+    r"|\bCERTIFICATIONS\b\s*:?"
+    r"|\bLANGUAGES\b\s*:?"
+)
+
+
 # ============================================================
 # 2. PDF TEXT EXTRACTION
 # ============================================================
 
 def extract_pdf_pages(pdf_path):
-    """Extract searchable text while preserving PDF page numbers."""
+    """Extract searchable text while preserving one-based PDF pages."""
     pdf_path = Path(pdf_path)
 
     if not pdf_path.is_file():
@@ -89,7 +105,8 @@ def extract_pdf_pages(pdf_path):
     reader = PdfReader(str(pdf_path))
     pages = []
 
-    print(f"\nPDF opened successfully. Pages: {len(reader.pages)}")
+    print(f"\nPDF opened successfully: {pdf_path.name}")
+    print(f"Pages: {len(reader.pages)}")
 
     for page_number, page in enumerate(reader.pages, start=1):
         try:
@@ -105,44 +122,29 @@ def extract_pdf_pages(pdf_path):
 
     if not any(page["text"] for page in pages):
         raise RuntimeError(
-            "No searchable text was extracted. "
-            "The PDF may need OCR."
+            "No searchable text was extracted. The PDF may need OCR."
         )
 
     return pages
+
 
 # ============================================================
 # 3. SECTION DETECTION
 # ============================================================
 
-SECTION_HEADING_PATTERN = (
-    r"\bPHASE\s+\d+\s*[—-]"
-    r"|\bPROFESSIONAL\s+SUMMARY\b\s*:?"
-    r"|\bSOFT\s+SKILLS\b\s*:?"
-    r"|\bTECHNICAL\s+SKILLS\b\s*:?"
-    r"|(?<!SOFT )(?<!TECHNICAL )\bSKILLS\b\s*(?::|↓)"    r"|\bEDUCATION\b\s*:?"
-    r"|\bPROJECTS\b\s*:?"
-    r"|\bINTERNSHIPS\s*&?\s*CERTIFICATIONS\b\s*:?"
-    r"|\bCERTIFICATIONS\b\s*:?"
-    r"|\bLANGUAGES\b\s*:?"
-)
-
 def split_into_sections(full_text):
-    """Split text at recognized section headings."""
+    """Split text at recognized headings."""
     sections = re.split(
         rf"(?={SECTION_HEADING_PATTERN})",
         full_text,
         flags=re.IGNORECASE,
     )
 
-    return [
-        section.strip()
-        for section in sections
-        if section.strip()
-    ]
+    return [section.strip() for section in sections if section.strip()]
+
 
 def get_section_name(section):
-    """Return the section name associated with a text segment."""
+    """Return the heading associated with a text segment."""
     text = section.strip()
 
     phase_match = re.match(
@@ -186,6 +188,7 @@ def get_section_name(section):
 
     return "General"
 
+
 # ============================================================
 # 4. SECTION-AWARE CHUNKING
 # ============================================================
@@ -195,7 +198,7 @@ def create_section_aware_chunks(
     chunk_size=CHUNK_SIZE,
     overlap=CHUNK_OVERLAP,
 ):
-    """Create chunks that stay within detected sections."""
+    """Create overlapping chunks and retain their source PDF pages."""
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than zero.")
 
@@ -250,7 +253,6 @@ def create_section_aware_chunks(
     print(f"\nExtracted words: {len(all_words)}")
     print(f"Detected sections: {len(sections)}")
     print(f"Created chunks: {len(chunks)}")
-
     print("\n--- Detected Sections ---")
 
     for index, section in enumerate(sections, start=1):
@@ -259,35 +261,13 @@ def create_section_aware_chunks(
 
     return chunks, chunk_page_numbers, chunk_section_names
 
+
 # ============================================================
-# 5. ROADMAP VECTOR COLLECTION
+# 5. CHROMADB COLLECTION AND INDEXING
 # ============================================================
 
-def rebuild_vector_collection(
-    chunks,
-    chunk_page_numbers,
-    chunk_section_names,
-    embedding_model,
-    pdf_path,
-):
-    """Rebuild only the configured roadmap collection."""
-    if not (
-        len(chunks)
-        == len(chunk_page_numbers)
-        == len(chunk_section_names)
-    ):
-        raise ValueError("Chunk data lists must have equal lengths.")
-
-    if not chunks:
-        raise ValueError("Cannot index an empty list of chunks.")
-
-    print("\nGenerating embeddings...")
-
-    embeddings = embedding_model.encode(
-        chunks,
-        show_progress_bar=True,
-    )
-
+def get_or_create_collection():
+    """Open the persistent collection, creating it if necessary."""
     client = chromadb.PersistentClient(path=str(CHROMA_PATH))
 
     try:
@@ -298,17 +278,75 @@ def rebuild_vector_collection(
             metadata={"hnsw:space": "l2"},
         )
 
-    existing_data = collection.get()
+    return client, collection
 
-    if existing_data["ids"]:
-        collection.delete(ids=existing_data["ids"])
-        print(f"Removed {len(existing_data['ids'])} old roadmap records.")
 
-    ids = [f"chunk_{i}" for i in range(len(chunks))]
+def rebuild_vector_collection(
+    chunks,
+    chunk_page_numbers,
+    chunk_section_names,
+    embedding_model,
+    pdf_path,
+):
+    """
+    Index one PDF without deleting records belonging to other PDFs.
+
+    IDs include a filename-derived prefix so different PDFs can both
+    contain a chunk_0 without overwriting each other.
+    """
+    if not (
+        len(chunks)
+        == len(chunk_page_numbers)
+        == len(chunk_section_names)
+    ):
+        raise ValueError("Chunk data lists must have equal lengths.")
+
+    if not chunks:
+        raise ValueError("Cannot index an empty list of chunks.")
+
+    pdf_path = Path(pdf_path)
+    source_name = pdf_path.name
+
+    source_prefix = hashlib.sha1(
+        source_name.encode("utf-8")
+    ).hexdigest()[:10]
+
+    print(f"\nGenerating embeddings for {source_name}...")
+
+    embeddings = embedding_model.encode(
+        chunks,
+        show_progress_bar=True,
+    )
+
+    _, collection = get_or_create_collection()
+
+    # Delete only the old records for this PDF, not every indexed PDF.
+    try:
+        existing = collection.get(
+            where={"source": source_name},
+            include=["metadatas"],
+        )
+        existing_ids = existing.get("ids", [])
+
+        if existing_ids:
+            collection.delete(ids=existing_ids)
+            print(
+                f"Removed {len(existing_ids)} old chunks "
+                f"for {source_name}."
+            )
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not replace existing records for {source_name}: {error}"
+        ) from error
+
+    ids = [
+        f"{source_prefix}_chunk_{index}"
+        for index in range(len(chunks))
+    ]
 
     metadatas = [
         {
-            "source": Path(pdf_path).name,
+            "source": source_name,
             "source_pages": ",".join(map(str, pages)),
             "section_name": section,
         }
@@ -325,16 +363,18 @@ def rebuild_vector_collection(
         metadatas=metadatas,
     )
 
-    print(f"Stored {len(chunks)} chunks in ChromaDB.")
+    print(f"Stored {len(chunks)} chunks for {source_name}.")
+    print(f"Total chunks in shared collection: {collection.count()}")
 
     return collection, embeddings
+
 
 # ============================================================
 # 6. TOPIC AND PROJECT DETECTION
 # ============================================================
 
 def is_broad_resume_question(question):
-    """Return True when the user asks for a whole-resume overview."""
+    """Identify questions asking for a whole-resume overview."""
     q = question.lower()
 
     return bool(
@@ -346,13 +386,81 @@ def is_broad_resume_question(question):
         )
     )
 
+
+
+def get_requested_source(question, available_sources):
+    """Identify a specific PDF when the question names one document."""
+    q = question.lower()
+
+    resume_terms = (
+        "my resume",
+        "my cv",
+        "in the resume",
+        "in my cv",
+        "from the resume",
+        "from my resume",
+    )
+
+    roadmap_terms = (
+        "the roadmap",
+        "my roadmap",
+        "in the roadmap",
+        "from the roadmap",
+        "ai/ml roadmap",
+        "ai/ml roadmap",
+    )
+
+    requested_type = None
+
+    if any(term in q for term in resume_terms):
+        requested_type = "resume"
+    elif any(term in q for term in roadmap_terms):
+        requested_type = "roadmap"
+
+    if requested_type is None:
+        return None
+
+    for source in available_sources:
+        filename = source.lower()
+
+        if requested_type == "resume" and (
+            "resume" in filename or "cv" in filename
+        ):
+            return source
+
+        if requested_type == "roadmap" and (
+            "roadmap" in filename or "aiml map" in filename
+        ):
+            return source
+
+    return None
+
+
+def is_cross_document_question(question):
+    """Identify questions that need evidence from multiple documents."""
+    q = question.lower()
+
+    explicit_comparison = re.search(
+        r"\b(compare|comparison|contrast|both documents|across documents|"
+        r"cross[- ]document|which of those|"       r"resume and (?:the )?roadmap|roadmap and (?:my )?resume|"
+        r"resume versus roadmap|roadmap versus resume)\b",
+        q,
+    )
+
+    mentions_both = (
+        re.search(r"\bresume\b", q)
+        and re.search(r"\broadmap\b", q)
+    )
+
+    return bool(explicit_comparison or mentions_both)
+
+
 def get_topic_aliases(question):
-    """Detect resume sections, project names, and roadmap topics."""
+    """Detect resume sections, project questions, and roadmap topics."""
     q = question.lower()
     aliases = []
 
     topic_rules = [
-        # Resume projects and named project titles
         (r"\bprojects?\b", "projects"),
         (
             r"\bnlp[-\s]+based\s+intelligent\s+text\s+"
@@ -363,37 +471,28 @@ def get_topic_aliases(question):
         ),
         (
             r"\bai[-\s]+powered\s+document\s+intelligence\b"
-            r"|\bdocument\s+intelligence\s+"
-            r"(?:and|&)\s*question\s+answering\b"
+            r"|\bdocument\s+intelligence\s+(?:and|&)\s*question\s+answering\b"
             r"|\bquestion\s+answering\s+system\b",
             "projects",
         ),
         (
-            r"\bend[-\s]+to[-\s]+end\s+"
-            r"(?:machine\s+learning|ml)\s+prediction\s+system\b"
+            r"\bend[-\s]+to[-\s]+end\s+(?:machine\s+learning|ml)\s+prediction\s+system\b"
             r"|\bprediction\s+system\b",
             "projects",
         ),
-        # Common wording for the NLP text-classification project and accuracy questions.
         (
-            r"\btext\s+classification\b|"
-            r"\bnlp\s+(?:text\s+)?classification\s+model\b|"
-            r"\bclassification\s+model\b|"
-            r"\baccuracy\s+percentage\b|"
-            r"\baccuracy\s+(?:of|for)\s+(?:my\s+)?"
+            r"\btext\s+classification\b|\bnlp\s+(?:text\s+)?classification\s+model\b"
+            r"|\bclassification\s+model\b|\baccuracy\s+percentage\b"
+            r"|\baccuracy\s+(?:of|for)\s+(?:my\s+)?"
             r"(?:nlp|text\s+classification|classification\s+model)\b",
             "projects",
         ),
-        # Resume sections
         (
-            r"\btechnical\s+skills?\b|\btech(?:nical)?\s+stack\b|"
-            r"\btechnologies\b|\btech\s+stack\b",
+            r"\btechnical\s+skills?\b|\btech(?:nical)?\s+stack\b"
+            r"|\btechnologies\b|\btech\s+stack\b",
             "technical skills",
         ),
-        (
-            r"\beducation(?:al)?\b|\bcollege\b|\bdegree\b",
-            "education",
-        ),
+        (r"\beducation(?:al)?\b|\bcollege\b|\bdegree\b", "education"),
         (r"\bcertifications?\b|\bcertificates?\b", "certifications"),
         (r"\binternships?\b", "internships"),
         (r"\bsoft\s+skills?\b", "soft skills"),
@@ -403,17 +502,14 @@ def get_topic_aliases(question):
         ),
         (r"\blanguages?\b", "languages"),
         (
-            r"\bcontact\s+information\b|\bemail address\b|"
-            r"\bphone number\b",
+            r"\bcontact\s+information\b|\bemail address\b|\bphone number\b",
             "contact information",
         ),
-        # Roadmap topics
         (r"\bmachine learning\b|\bml\b", "machine learning"),
         (r"\bai agents?\b|\bagents?\b|\bagentic\b", "ai agents"),
         (r"\brag\b|retrieval[- ]augmented", "rag"),
         (
-            r"\bvector databases?\b|\bvector db\b|"
-            r"vector storage|similarity search",
+            r"\bvector databases?\b|\bvector db\b|vector storage|similarity search",
             "vector database",
         ),
         (
@@ -424,10 +520,7 @@ def get_topic_aliases(question):
         (r"\bdeploy(?:ment)?\b|\bcloud\b|\bhosting\b", "deployment"),
         (r"\bpython\b|programming foundation", "python foundation"),
         (r"\bsql\b|postgresql", "data + sql"),
-        (
-            r"deep learning|neural networks?|\bpytorch\b",
-            "deep learning",
-        ),
+        (r"deep learning|neural networks?|\bpytorch\b", "deep learning"),
         (r"\bnlp\b|natural language processing", "deep learning"),
         (r"\bllm\b|large language models?", "llm engineering"),
         (r"prompt engineering|\bprompting\b", "prompt engineering"),
@@ -450,7 +543,6 @@ def get_topic_aliases(question):
         if topic and topic not in aliases:
             aliases.append(topic)
 
-    # Whole-resume questions need evidence from multiple resume sections.
     if is_broad_resume_question(question):
         for topic in (
             "education",
@@ -468,19 +560,17 @@ def get_topic_aliases(question):
 
     return aliases
 
+
 # ============================================================
-# 7. STRICT SECTION MATCHING
+# 7. SECTION MATCHING
 # ============================================================
 
 def section_match(section_name, aliases):
-    """
-    Match resume sections exactly to avoid Skills/Soft Skills
-    confusion. Roadmap sections use their own matching rules.
-    """
+    """Match section metadata against detected topic aliases."""
     heading = re.sub(
         r"[^a-z0-9+ ]+",
         " ",
-        section_name.lower(),
+        (section_name or "").lower(),
     )
     heading = " ".join(heading.split())
 
@@ -534,7 +624,7 @@ def section_match(section_name, aliases):
 
 
 def get_target_sections(aliases):
-    """Map detected aliases to exact section metadata values."""
+    """Map aliases to exact section metadata values."""
     mapping = {
         "projects": ["Projects"],
         "technical skills": ["Technical Skills", "Skills"],
@@ -582,7 +672,7 @@ def filter_by_distance(
     candidates,
     max_distance=MAX_RETRIEVAL_DISTANCE,
 ):
-    """Keep only candidates within the configured distance."""
+    """Keep candidates within the configured distance threshold."""
     return [
         item for item in candidates
         if item["distance"] <= max_distance
@@ -591,16 +681,12 @@ def filter_by_distance(
 
 def prioritize_matching_sections(eligible, aliases, question=""):
     """
-    Keep retrieval focused on the resume sections the question asks about.
-
-    A project-only question is narrowed to Projects. Questions explicitly
-    asking for projects and another section retain evidence from both.
+    Prefer requested sections while preserving cross-document coverage.
+    Project questions focus on Projects unless another section is requested.
     """
-    
-     # ADD THESE TWO LINES HERE
     if not aliases:
         return eligible, False
-    
+
     matching = [
         item for item in eligible
         if item.get("matched_section", False)
@@ -622,16 +708,11 @@ def prioritize_matching_sections(eligible, aliases, question=""):
         )
     )
 
-    asks_for_projects = "projects" in aliases or bool(
-        re.search(
-            r"\b(?:project|projects|demonstrate|demonstrates|"
-            r"demonstrated|showcase|showcases)\b",
-            q,
-        )
+    asks_for_projects = (
+        "projects" in aliases
+        or bool(re.search(r"\b(?:project|projects)\b", q))
     )
 
-    # Keep project-specific questions focused on project evidence,
-    # unless the user clearly asks for another section as well.
     if asks_for_projects and not asks_for_other_section:
         project_chunks = [
             item for item in matching
@@ -658,41 +739,47 @@ def retrieve_chunks(
     total_chunks,
 ):
     """
-    Retrieve relevant chunks, query requested sections, filter by distance,
-    and prioritize matching sections.
+    Retrieve relevant chunks and prioritize source coverage for comparisons.
 
-    Return format remains compatible with src/app.py:
-    ids, texts, distances, metadata.
+    Return format is compatible with src/app.py:
+    ids, texts, distances, metadatas.
     """
     if total_chunks <= 0:
-        print("The document contains no searchable chunks.")
+        print("The collection contains no searchable chunks.")
         return [], [], [], []
 
     query_embedding = embedding_model.encode(
         [question]
     ).tolist()
 
+    
     aliases = get_topic_aliases(question)
     target_sections = get_target_sections(aliases)
+    cross_document = is_cross_document_question(question)
 
     print("\n--- Retrieval Diagnostics ---")
     print(f"Question: {question}")
     print(f"Detected aliases: {aliases}")
     print(f"Target sections: {target_sections}")
+    print(f"Cross-document comparison: {cross_document}")
 
     candidates_by_id = {}
 
     def add_query_results(results):
-        """Merge results without duplicating chunk IDs."""
-        if not results or not results.get("ids"):
+        """Merge nested Chroma query results by unique chunk ID."""
+        if not results:
             return
 
-        ids = results["ids"][0]
-        documents = results["documents"][0]
-        distances = results["distances"][0]
-        metadatas = results["metadatas"][0]
+        ids_groups = results.get("ids") or []
+        if not ids_groups or not ids_groups[0]:
+            return
 
-        for chunk_id, text, distance, metadata in zip(
+        ids = ids_groups[0]
+        documents = (results.get("documents") or [[]])[0]
+        distances = (results.get("distances") or [[]])[0]
+        metadatas = (results.get("metadatas") or [[]])[0]
+
+        for chunk_id, document, distance, metadata in zip(
             ids,
             documents,
             distances,
@@ -700,38 +787,114 @@ def retrieve_chunks(
         ):
             metadata = metadata or {}
             distance = float(distance)
-            existing = candidates_by_id.get(chunk_id)
 
-            if existing is None or distance < existing["distance"]:
-                candidates_by_id[chunk_id] = {
-                    "id": chunk_id,
-                    "text": text,
-                    "distance": distance,
-                    "metadata": metadata,
-                }
+            candidate = {
+                "id": chunk_id,
+                "text": document or "",
+                "distance": distance,
+                "metadata": metadata,
+            }
 
-    candidate_count = min(CANDIDATE_K, total_chunks)
+            previous = candidates_by_id.get(chunk_id)
 
-    # A. Semantic retrieval
-    semantic_results = collection.query(
-        query_embeddings=query_embedding,
-        n_results=candidate_count,
-        include=["documents", "distances", "metadatas"],
+            if previous is None or distance < previous["distance"]:
+                candidates_by_id[chunk_id] = candidate
+
+    candidate_count = max(1, min(CANDIDATE_K, total_chunks))
+
+    # A. Global semantic retrieval.
+    add_query_results(
+        collection.query(
+            query_embeddings=query_embedding,
+            n_results=candidate_count,
+            include=["documents", "distances", "metadatas"],
+        )
     )
 
-    add_query_results(semantic_results)
+    # B. For comparisons, independently retrieve from each indexed source.
+    # This prevents a larger PDF from crowding the other PDF out.
+    
+    source_names = set()
 
-    # B. Explicit queries for requested sections
+    try:
+        all_metadata = collection.get(include=["metadatas"])
+
+        for metadata in all_metadata.get("metadatas") or []:
+            if metadata and metadata.get("source"):
+                source_names.add(metadata["source"])
+
+    except Exception as error:
+        print(f"Could not enumerate PDF sources: {error}")
+
+    requested_source = get_requested_source(
+        question,
+        source_names,
+    )
+
+    print(f"Requested source: {requested_source}")
+
+    if cross_document:
+        try:
+            all_metadata = collection.get(include=["metadatas"])
+
+            for metadata in all_metadata.get("metadatas") or []:
+                if metadata and metadata.get("source"):
+                    source_names.add(metadata["source"])
+
+        except Exception as error:
+            print(f"Could not enumerate PDF sources: {error}")
+
+        print(f"Indexed sources: {sorted(source_names)}")
+
+        if len(source_names) > 1:
+            print("\n--- Per-Source Retrieval ---")
+
+            for source_name in sorted(source_names):
+                try:
+                    source_records = collection.get(
+                        where={"source": source_name},
+                        include=["metadatas"],
+                    )
+                    source_count = len(source_records.get("ids", []))
+
+                    if not source_count:
+                        continue
+
+                    results = collection.query(
+                        query_embeddings=query_embedding,
+                        n_results=min(candidate_count, source_count),
+                        where={"source": source_name},
+                        include=["documents", "distances", "metadatas"],
+                    )
+
+                    before = set(candidates_by_id)
+                    add_query_results(results)
+                    added = len(set(candidates_by_id) - before)
+
+                    print(
+                        f"Source: {source_name} | "
+                        f"Chunks: {source_count} | "
+                        f"New candidates: {added}"
+                    )
+
+                except Exception as error:
+                    print(
+                        f"Source query failed for {source_name}: "
+                        f"{type(error).__name__}: {error}"
+                    )
+
+    # C. Query every requested section explicitly.
     print("\n--- Targeted Section Retrieval ---")
 
     for section_name in target_sections:
         try:
-            section_matches = collection.get(
+            section_records = collection.get(
                 where={"section_name": section_name},
                 include=["metadatas"],
             )
 
-            section_count = len(section_matches["ids"])
+            # ChromaDB count(where=...) is not portable across versions.
+            section_count = len(section_records.get("ids", []))
 
             if section_count == 0:
                 print(
@@ -740,20 +903,19 @@ def retrieve_chunks(
                 )
                 continue
 
-            section_results = collection.query(
+            results = collection.query(
                 query_embeddings=query_embedding,
                 n_results=min(candidate_count, section_count),
                 where={"section_name": section_name},
                 include=["documents", "distances", "metadatas"],
             )
 
-            before_ids = set(candidates_by_id)
-            add_query_results(section_results)
-            added_count = len(set(candidates_by_id) - before_ids)
+            before = set(candidates_by_id)
+            add_query_results(results)
+            added = len(set(candidates_by_id) - before)
 
             print(
-                f"Section: {section_name} | "
-                f"New candidates: {added_count}"
+                f"Section: {section_name} | New candidates: {added}"
             )
 
         except Exception as error:
@@ -762,44 +924,63 @@ def retrieve_chunks(
                 f"{type(error).__name__}: {error}"
             )
 
-    # C. Score candidates
+    # D. Score and annotate every unique candidate.
     ranked = []
 
     for item in candidates_by_id.values():
         section_name = item["metadata"].get("section_name", "")
-        matched = section_match(section_name, aliases)
-
-        item["matched_section"] = matched
+        item["matched_section"] = section_match(section_name, aliases)
         item["rerank_score"] = (
             item["distance"]
-            - (SECTION_MATCH_BONUS if matched else 0)
+            - (
+                SECTION_MATCH_BONUS
+                if item["matched_section"]
+                else 0.0
+            )
         )
-
         ranked.append(item)
 
     if not ranked:
         print("No chunks were retrieved.")
         return [], [], [], []
 
-    # D. Apply the original distance threshold
+    
     eligible = filter_by_distance(ranked)
 
+    # Keep single-document questions restricted to the requested PDF.
+    # Cross-document comparisons must still use evidence from both PDFs.
+    if requested_source and not cross_document:
+        eligible = [
+            item for item in eligible
+            if item["metadata"].get("source") == requested_source
+        ]
+
+        print(f"Filtering results to source: {requested_source}")
+        print(f"Chunks remaining after source filter: {len(eligible)}")
+
     print("\n--- Retrieval Summary ---")
+
     print(f"Unique candidates examined: {len(ranked)}")
     print(f"Chunks within threshold: {len(eligible)}")
     print(f"Maximum allowed distance: {MAX_RETRIEVAL_DISTANCE:.4f}")
 
     if not eligible:
         print("No chunks passed the relevance threshold.")
-        print("No answer will be generated from irrelevant context.")
         return [], [], [], []
 
-    # E. Prefer matching sections
-    eligible, topic_filter_applied = prioritize_matching_sections(
-        eligible,
-        aliases,
-        question,
-    )
+    # E. Apply section matching.
+    if cross_document:
+        topic_filter_applied = False
+        print(
+            "Cross-document comparison: preserving candidates "
+            "from all document sources."
+        )
+    else:
+       eligible, topic_filter_applied = prioritize_matching_sections(
+          eligible,
+          aliases,
+          question,
+        )
 
     if topic_filter_applied:
         print(
@@ -807,14 +988,10 @@ def retrieve_chunks(
             f"Matching chunks: {len(eligible)}"
         )
     elif aliases:
-        print(
-            "No matching section passed the threshold. "
-            "Using semantic fallback."
-        )
+        print("No matching section passed the threshold; using semantic fallback.")
     else:
         print("Using semantic relevance without section filtering.")
 
-    # F. Rank and select the final chunks
     eligible.sort(
         key=lambda item: (
             item["rerank_score"],
@@ -822,32 +999,62 @@ def retrieve_chunks(
         )
     )
 
-    if is_broad_resume_question(question):
-        # Prefer coverage across sections before selecting a second chunk
-        # from a section. Normal focused questions still use TOP_K.
-        selection_limit = min(10, max(TOP_K, len(target_sections)))
+    # F. Select final context, guaranteeing source diversity for comparisons.
+    selected = []
+    selected_ids = set()
 
-        selected = []
+    if cross_document and len(source_names) > 1:
+        for source_name in sorted(source_names):
+            source_candidates = [
+                item for item in eligible
+                if item["metadata"].get("source") == source_name
+            ]
+
+            if source_candidates:
+                best = source_candidates[0]
+
+                if best["id"] not in selected_ids:
+                    selected.append(best)
+                    selected_ids.add(best["id"])
+
+        # Fill the remaining slots with the best-ranked distinct chunks.
+        for item in eligible:
+            if len(selected) >= TOP_K:
+                break
+
+            if item["id"] not in selected_ids:
+                selected.append(item)
+                selected_ids.add(item["id"])
+
+        # If the number of sources exceeds TOP_K, preserve the best overall.
+        selected.sort(
+            key=lambda item: (
+                item["rerank_score"],
+                item["distance"],
+            )
+        )
+        selected = selected[:TOP_K]
+
+    elif is_broad_resume_question(question):
+        selection_limit = min(10, max(TOP_K, len(target_sections)))
         seen_sections = set()
 
         for item in eligible:
             section = (
-                item.get("metadata", {})
-                .get("section_name", "unknown")
+                item["metadata"].get("section_name", "unknown")
                 .strip()
                 .lower()
             )
 
             if section not in seen_sections:
                 selected.append(item)
+                selected_ids.add(item["id"])
                 seen_sections.add(section)
 
             if len(selected) >= selection_limit:
                 break
 
         if len(selected) < selection_limit:
-            selected_ids = {item["id"] for item in selected}
-
             for item in eligible:
                 if item["id"] not in selected_ids:
                     selected.append(item)
@@ -855,9 +1062,28 @@ def retrieve_chunks(
 
                 if len(selected) >= selection_limit:
                     break
+
     else:
         selected = eligible[:TOP_K]
 
+    # For ordinary questions, avoid sending multiple chunks
+    # from the same section when other sections are available.
+    if not cross_document and not is_broad_resume_question(question):
+        deduplicated = []
+        seen_sections = set()
+
+        for item in selected:
+            section = (
+                item["metadata"].get("section_name", "unknown")
+                .strip()
+                .lower()
+            )
+
+            if section not in seen_sections:
+                deduplicated.append(item)
+                seen_sections.add(section)
+
+        selected = deduplicated
     print(f"\nChunks passed to Gemini: {len(selected)}")
 
     for item in selected:
@@ -865,12 +1091,12 @@ def retrieve_chunks(
 
         print(
             f"\nChunk: {item['id']} | "
+            f"Source: {metadata.get('source', 'unknown')} | "
             f"Distance: {item['distance']:.4f} | "
             f"Rerank: {item['rerank_score']:.4f} | "
             f"Section: {metadata.get('section_name', 'unknown')} | "
             f"Pages: {metadata.get('source_pages', 'unknown')}"
         )
-
         print(f"Preview: {item['text'][:350]}...")
 
     return (
@@ -891,7 +1117,7 @@ def build_grounded_prompt(
     retrieved_texts,
     retrieved_metadatas,
 ):
-    """Build a prompt that requires answers to be supported by evidence."""
+    """Build a grounded prompt with source filenames and PDF pages."""
     if not (
         len(retrieved_ids)
         == len(retrieved_texts)
@@ -923,33 +1149,51 @@ def build_grounded_prompt(
 
     prompt = f"""
 You are a careful document question-answering assistant.
+
 Answer the user's question using only the supplied document context.
 
 GROUNDING RULES:
-- Use the supplied context as the source of truth.
+- Treat the supplied context as the only source of facts.
 - Never invent facts, technologies, project names, metrics, or citations.
 - If the context does not support an answer, say so clearly.
-- Do not fill missing details using general knowledge.
 - If only part of the question is answerable, answer that part and
-  explain which information is missing.
-- For a named project, use evidence associated with that project.
+  explain what information is missing.
+- Distinguish an explicit statement from a reasonable inference.
+- Do not assume that two projects are the same just because their topics
+  are similar.
+- When comparing documents, identify which PDF supports each claim.
 - Distinguish technologies explicitly associated with a project from
   technologies merely listed elsewhere.
-- When asked for multiple projects, include every distinct project
-  supported by the supplied context.
 - Do not claim that a model achieved an accuracy percentage unless
-  that percentage is explicitly stated in the context.
+  the percentage is explicitly stated in the context.
+- If a requested document is not represented in the context, disclose
+  that limitation instead of pretending to have searched it.
+
+COMPARISON RULES:
+- For questions comparing a resume and roadmap, inspect evidence from
+  both sources when both are present in the context.
+- Separate projects explicitly mentioned in the resume from projects
+  suggested or listed in the roadmap.
+- Identify overlapping project areas only when the supplied text supports
+  the overlap.
+- Do not claim that a roadmap project was completed for the resume unless
+  the resume supports that conclusion.
+- If the documents differ, describe the difference rather than forcing
+  a match.
 
 CITATION RULES:
-- Use only page numbers supplied in the source metadata.
-- Page numbers are one-based PDF page numbers.
-- Cite claims using [PDF page 1] or [PDF pages 1, 2].
-- Never invent page numbers.
+- Cite every important document-based claim.
+- Use the PDF filename and one-based PDF page numbers provided in metadata.
+- Format citations like [Aiml map .pdf, PDF page 17] or
+  [WoohasrResume.pdf, PDF pages 2, 3].
+- Use the exact source filename provided in the context.
+- Never invent filenames or page numbers.
 
 WRITING RULES:
-- Use clear, concise bullets when helpful.
+- Answer the actual question directly.
+- Use concise bullets or a table when useful.
 - Preserve project names and document terminology.
-- Do not present an inference as an explicit fact from the document.
+- Do not repeat the same point unnecessarily.
 
 DOCUMENT CONTEXT:
 {context}
@@ -959,6 +1203,7 @@ USER QUESTION:
 """
 
     return prompt.strip()
+
 
 # ============================================================
 # 11. GEMINI MODEL DISCOVERY
@@ -1011,7 +1256,7 @@ def list_text_generation_models(gemini_client):
     if not ordered:
         print(
             "No API-listed Flash models found; "
-            "using configured fallbacks."
+            "using configured fallback models."
         )
 
     return ordered
@@ -1022,7 +1267,7 @@ def list_text_generation_models(gemini_client):
 # ============================================================
 
 def generate_answer(gemini_client, prompt):
-    """Try available models and fallbacks if a request fails."""
+    """Try available models and configured fallbacks."""
     available_models = list_text_generation_models(gemini_client)
 
     models_to_try = []
@@ -1034,7 +1279,7 @@ def generate_answer(gemini_client, prompt):
     models_to_try = models_to_try[:MAX_MODEL_ATTEMPTS]
 
     if not models_to_try:
-        print("No candidate models are configured.")
+        print("No candidate Gemini models are configured.")
         return False
 
     last_error = None
@@ -1052,7 +1297,7 @@ def generate_answer(gemini_client, prompt):
                 ),
             )
 
-            answer = response.text
+            answer = getattr(response, "text", None)
 
             if answer and answer.strip():
                 print(f"\n--- Answer from {model_name} ---")
@@ -1062,12 +1307,10 @@ def generate_answer(gemini_client, prompt):
             last_error = RuntimeError(
                 f"{model_name} returned no text."
             )
-
             print(last_error)
 
         except Exception as error:
             last_error = error
-
             print(
                 f"Request failed for {model_name}: "
                 f"{type(error).__name__}: {error}"
@@ -1078,7 +1321,8 @@ def generate_answer(gemini_client, prompt):
 
     print("\nGemini could not generate an answer.")
     print(
-        "Review the errors above for model access, quota, or service issues."
+        "Review the errors above for model access, quota, "
+        "or service issues."
     )
     print("Keep your API key private.")
 
@@ -1091,18 +1335,23 @@ def generate_answer(gemini_client, prompt):
 
 
 # ============================================================
-# 13. MAIN PROGRAM
+# 13. STANDALONE MAIN PROGRAM
 # ============================================================
 
 def main():
+    """
+    Standalone command-line entry point.
+
+    This entry point indexes the configured roadmap PDF. The Streamlit
+    application must index uploaded PDFs separately to enable comparisons
+    across the resume and roadmap.
+    """
     load_dotenv(ENV_PATH)
 
     api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
-        print(
-            "ERROR: GEMINI_API_KEY was not found in your .env file."
-        )
+        print("ERROR: GEMINI_API_KEY was not found in your .env file.")
         print("Keep your API key private.")
         return
 
@@ -1138,54 +1387,57 @@ def main():
         )
 
         print(f"\nEmbedding count: {len(embeddings)}")
-
         print(
             f"Chunk size: {CHUNK_SIZE}; "
             f"overlap: {CHUNK_OVERLAP}"
         )
-
         print(
-            f"Retrieval: up to {CANDIDATE_K} semantic candidates; "
+            f"Retrieval: up to {CANDIDATE_K} candidates; "
             f"up to {TOP_K} chunks passed to Gemini"
         )
 
-        question = input(
-            "\nAsk a question about your PDF: "
-        ).strip()
+        while True:
+            question = input(
+                "\nAsk a question about your indexed PDFs "
+                "(or type 'exit' to quit): "
+            ).strip()
 
-        if not question:
-            print("ERROR: Please enter a question.")
-            return
+            if question.lower() in {"exit", "quit"}:
+                print("Goodbye.")
+                break
 
-        (
-            retrieved_ids,
-            retrieved_texts,
-            distances,
-            metadatas,
-        ) = retrieve_chunks(
-            collection,
-            embedding_model,
-            question,
-            collection.count(),
-        )
+            if not question:
+                print("Please enter a question.")
+                continue
 
-        if not retrieved_texts:
-            print(
-                "\nNo answer was generated because no relevant "
-                "document context passed the retrieval filter."
+            (
+                retrieved_ids,
+                retrieved_texts,
+                distances,
+                metadatas,
+            ) = retrieve_chunks(
+                collection,
+                embedding_model,
+                question,
+                collection.count(),
             )
-            return
 
-        prompt = build_grounded_prompt(
-            question,
-            retrieved_ids,
-            retrieved_texts,
-            metadatas,
-        )
+            if not retrieved_texts:
+                print(
+                    "\nNo answer was generated because no relevant "
+                    "document context passed the retrieval filter."
+                )
+                continue
 
-        print("\nGenerating an answer from the PDF context...")
+            prompt = build_grounded_prompt(
+                question,
+                retrieved_ids,
+                retrieved_texts,
+                metadatas,
+            )
 
-        generate_answer(gemini_client, prompt)
+            print("\nGenerating an answer from the retrieved context...")
+            generate_answer(gemini_client, prompt)
 
     except KeyboardInterrupt:
         print("\nProgram cancelled by user.")

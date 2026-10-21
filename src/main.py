@@ -726,9 +726,12 @@ def retrieve_chunks(
 
     for section_name in target_sections:
         try:
-            section_count = collection.count(
-                where={"section_name": section_name}
+            section_matches = collection.get(
+                where={"section_name": section_name},
+                include=["metadatas"],
             )
+
+            section_count = len(section_matches["ids"])
 
             if section_count == 0:
                 print(

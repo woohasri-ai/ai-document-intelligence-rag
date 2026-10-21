@@ -7,6 +7,13 @@ import streamlit as st
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.main import (
     BASE_DIR,
     EMBEDDING_MODEL_NAME,

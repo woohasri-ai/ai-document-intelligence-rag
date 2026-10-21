@@ -1187,7 +1187,8 @@ CITATION RULES:
 - Format citations like [Aiml map .pdf, PDF page 17] or
   [WoohasrResume.pdf, PDF pages 2, 3].
 - Use the exact source filename provided in the context.
-- Never invent filenames or page numbers.
+- Never invent page numbers.
+- Never invent filenames.
 
 WRITING RULES:
 - Answer the actual question directly.

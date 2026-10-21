@@ -1,5 +1,9 @@
 # DocuMind AI — AI-Powered Document Intelligence & Question Answering
 
+[![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Built%20with-Streamlit-FF4B4B.svg)](https://streamlit.io/)
+
 DocuMind AI is an AI-powered document question-answering application built using **Retrieval-Augmented Generation (RAG)**. It allows users to upload multiple PDF documents, ask questions about their contents, and receive AI-generated answers supported by relevant document passages and PDF page references.
 
 Powered by Google Gemini, Sentence Transformers, and ChromaDB, DocuMind AI combines semantic search with grounded answer generation to make document research more accessible and verifiable.
